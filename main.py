@@ -55,7 +55,7 @@ PROJECTS = [
     ("📸 Контент-чат", "https://t.me/+3gPoOsKhGF8zZWRi"),
     ("📝 Instagram блог", "https://instagram.com/esmeralda_kissa"),
     ("📽️ Фільмотека кіно", "https://t.me/swoi_kino"),
-    ("🚕 SWої Taxi/Bla-blaCar", "https://t.me/+3gPoOsKhGF8zZWRi"),
+    ("🚕 SWої Taxi/Bla-blaCar", "https://t.me/+bfqsxj8G3-0xZjNi"),
     ("☠️ Чат-анархія", "https://t.me/komenty_swoih"),
     ("✌️ Резервний чат в Signal",
      "https://signal.group/#CjQKIMLrwXMW3n_zvvA_vQsIh5wuSvKpb9SoDXD8KwOJJl7FEhA-5oVc-cdP00VFwuLF1IRG"),
@@ -74,14 +74,13 @@ def projects_kb():
     kb.adjust(1)
     return kb.as_markup()
 
-# ---------- УТИЛІТИ ----------
+# ---------- УТИЛІТА: витягти UID із тексту ----------
 UID_PATTERNS = [
     re.compile(r"UID:\s*(\d+)"),
     re.compile(r"user_id\s*=\s*<code>(\d+)</code>"),
     re.compile(r"tg://user\?id=(\d+)"),
     re.compile(r"\bID[:=]\s*(\d+)\b"),
 ]
-
 def extract_uid_from_text(text: str) -> Optional[int]:
     if not text:
         return None
@@ -91,7 +90,7 @@ def extract_uid_from_text(text: str) -> Optional[int]:
             try:
                 return int(m.group(1))
             except Exception:
-                continue
+                pass
     return None
 
 # ---------- КОМАНДИ ----------
@@ -123,46 +122,50 @@ async def from_user(m: Message):
         return
 
     u = m.from_user
-    uid_line = f"UID: {u.id}"  # явна лінійка для фолбеку
+    uid_line = f"UID: {u.id}"  # явний рядок для фолбеку
     header = (
         "📥 <b>Нове звернення</b>\n"
         f"👤 {u.full_name} @{u.username or '—'}\n"
         f"🆔 <code>{u.id}</code>\n"
         f"{uid_line}\n"
         f"🔗 <a href='tg://user?id={u.id}'>відкрити профіль</a>\n\n"
-        "✍️ Можеш відповісти <b>реплаєм</b> на <b>будь-яке</b> із двох повідомлень нижче (шапка або копія) — я перешлю користувачу."
+        "✍️ Відповідай <b>реплаєм</b> на <b>шапку</b> або на <b>копію</b> нижче — я перешлю користувачу."
     )
 
     # 1) шапка (містить UID)
     head_msg = await bot.send_message(ADMIN_USER_ID, header, disable_web_page_preview=True)
-    # 2) копія повідомлення (для медіа)
+    # 2) копія повідомлення (медіа збережуться)
     copy_msg = await m.copy_to(ADMIN_USER_ID)
 
     # Прив'язуємо ОБИДВА message_id до користувача
     ROUTE[head_msg.message_id] = u.id
     ROUTE[copy_msg.message_id] = u.id
 
-    log.info("Route saved: admin_head_msg_id=%s, admin_copy_msg_id=%s -> user=%s",
+    log.info("Route saved: head_id=%s copy_id=%s -> user=%s",
              head_msg.message_id, copy_msg.message_id, u.id)
 
 # ---------- АДМІН → КОРИСТУВАЧ ----------
-@dp.message((F.chat.type == "private") & (F.from_user.id == ADMIN_USER_ID) & (F.reply_to_message != None))
+# КЛЮЧОВЕ: фільтруємо за chat.id == ADMIN_USER_ID (це приватний чат «бот ↔ адмін»)
+@dp.message((F.chat.type == "private") & (F.chat.id == ADMIN_USER_ID) & (F.reply_to_message != None))
 async def from_admin_reply(m: Message):
+    log.info("Admin reply handler fired. chat.id=%s from_user.id=%s",
+             m.chat.id, m.from_user.id)
+
     # 1) спроба знайти за ROUTE
     reply_to_id = m.reply_to_message.message_id
     user_id = ROUTE.get(reply_to_id)
 
-    # 2) фолбек — дістаємо UID із тексту/капшена повідомлення, на яке відповіли
+    # 2) фолбек — витягаємо UID із тексту/капшена повідомлення, на яке відповіли
     if not user_id:
         src_text = (m.reply_to_message.text or "") + "\n" + (m.reply_to_message.caption or "")
         user_id = extract_uid_from_text(src_text)
         if user_id:
-            log.info("Fallback UID parsed from text: %s", user_id)
+            log.info("Fallback UID parsed from replied message text: %s", user_id)
 
     if not user_id:
         await m.reply(
             "ℹ️ Не знайшов одержувача. Попроси користувача написати ще раз, "
-            "або відповідай саме на повідомлення зі шапкою, де є рядок «UID: …»."
+            "або відповідай на «шапку», де є рядок <b>UID: ...</b>."
         )
         log.warning("No route/UID for admin reply. reply_to_id=%s", reply_to_id)
         return
