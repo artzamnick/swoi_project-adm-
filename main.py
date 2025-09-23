@@ -10,10 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 
 # ---------- ЛОГИ ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("admin_bot")
 
 # ---------- ENV ----------
@@ -31,10 +28,9 @@ except Exception:
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# message_id у чаті адміна → user_id користувача (пам'ять у процесі)
+# admin_msg_id -> user_id
 ROUTE: Dict[int, int] = {}
 
-# ---------- ТЕКСТИ / КНОПКИ ----------
 WELCOME_TEXT = (
     "🤖 Привіт! Ти в чаті з адмінами\n"
     "🍓🔞 SWої люди: Клуб України 🔞🍓🇺🇦\n\n"
@@ -74,7 +70,6 @@ def projects_kb():
     kb.adjust(1)
     return kb.as_markup()
 
-# ---------- УТИЛІТА: витягти UID із тексту ----------
 UID_PATTERNS = [
     re.compile(r"UID:\s*(\d+)"),
     re.compile(r"user_id\s*=\s*<code>(\d+)</code>"),
@@ -113,31 +108,27 @@ async def cmd_id(m: Message):
 # ---------- КОРИСТУВАЧ → АДМІН ----------
 @dp.message(F.chat.type == "private")
 async def from_user(m: Message):
-    # ігноруємо, якщо пише сам адмін
     if ADMIN_USER_ID and m.from_user.id == ADMIN_USER_ID:
+        # адмін пише в бота — ігноруємо як звернення
         return
-
     if ADMIN_USER_ID is None:
         await m.answer("⚠️ Бот ще не налаштований: ADMIN_USER_ID відсутній.")
         return
 
     u = m.from_user
-    uid_line = f"UID: {u.id}"  # явний рядок для фолбеку
+    uid_line = f"UID: {u.id}"
     header = (
         "📥 <b>Нове звернення</b>\n"
         f"👤 {u.full_name} @{u.username or '—'}\n"
         f"🆔 <code>{u.id}</code>\n"
         f"{uid_line}\n"
         f"🔗 <a href='tg://user?id={u.id}'>відкрити профіль</a>\n\n"
-        "✍️ Відповідай <b>реплаєм</b> на <b>шапку</b> або на <b>копію</b> нижче — я перешлю користувачу."
+        "✍️ Відповідай <b>реплаєм</b> на <b>шапку</b> або <b>копію</b> — я перешлю користувачу."
     )
 
-    # 1) шапка (містить UID)
     head_msg = await bot.send_message(ADMIN_USER_ID, header, disable_web_page_preview=True)
-    # 2) копія повідомлення (медіа збережуться)
     copy_msg = await m.copy_to(ADMIN_USER_ID)
 
-    # Прив'язуємо ОБИДВА message_id до користувача
     ROUTE[head_msg.message_id] = u.id
     ROUTE[copy_msg.message_id] = u.id
 
@@ -145,45 +136,61 @@ async def from_user(m: Message):
              head_msg.message_id, copy_msg.message_id, u.id)
 
 # ---------- АДМІН → КОРИСТУВАЧ ----------
-# КЛЮЧОВЕ: фільтруємо за chat.id == ADMIN_USER_ID (це приватний чат «бот ↔ адмін»)
-@dp.message((F.chat.type == "private") & (F.chat.id == ADMIN_USER_ID) & (F.reply_to_message != None))
-async def from_admin_reply(m: Message):
-    log.info("Admin reply handler fired. chat.id=%s from_user.id=%s",
-             m.chat.id, m.from_user.id)
+# приймаємо реплай, якщо: приватний чат І (chat.id == ADMIN_USER_ID АБО from_user.id == ADMIN_USER_ID)
+@dp.message((F.chat.type == "private") & (F.reply_to_message != None))
+async def admin_reply_router(m: Message):
+    # діагностика всіх реплаїв у приватах
+    log.info(
+        "Seen private REPLY: chat.id=%s from_user.id=%s reply_to_id=%s",
+        m.chat.id, m.from_user.id, m.reply_to_message.message_id if m.reply_to_message else None
+    )
 
-    # 1) спроба знайти за ROUTE
+    if not (
+        (ADMIN_USER_ID is not None)
+        and (m.chat.id == ADMIN_USER_ID or m.from_user.id == ADMIN_USER_ID)
+    ):
+        return  # не наш адмін/не наш приват
+
+    # 1) пробуємо по ROUTE
     reply_to_id = m.reply_to_message.message_id
     user_id = ROUTE.get(reply_to_id)
 
-    # 2) фолбек — витягаємо UID із тексту/капшена повідомлення, на яке відповіли
+    # 2) фолбек — UID із тексту/капшена того, на що відповіли
     if not user_id:
         src_text = (m.reply_to_message.text or "") + "\n" + (m.reply_to_message.caption or "")
         user_id = extract_uid_from_text(src_text)
         if user_id:
-            log.info("Fallback UID parsed from replied message text: %s", user_id)
+            log.info("Fallback UID parsed: %s", user_id)
 
     if not user_id:
         await m.reply(
-            "ℹ️ Не знайшов одержувача. Попроси користувача написати ще раз, "
-            "або відповідай на «шапку», де є рядок <b>UID: ...</b>."
+            "ℹ️ Не знайшов одержувача. Попроси користувача написати ще раз "
+            "або відповідай на «шапку» з рядком <b>UID: …</b>."
         )
-        log.warning("No route/UID for admin reply. reply_to_id=%s", reply_to_id)
+        log.warning("No user_id for admin reply. reply_to_id=%s", reply_to_id)
         return
 
     try:
         if m.text:
             await bot.send_message(user_id, f"✉️ <b>Від адміна</b>:\n{m.text}")
         else:
-            await m.copy_to(user_id)  # фото/відео/док — копією
+            await m.copy_to(user_id)
         await m.reply("✅ Відповідь надіслана.")
         log.info("Reply delivered to user %s", user_id)
     except Exception as e:
         log.exception("Send fail to user %s: %s", user_id, e)
         await m.reply("⚠️ Не вдалося надіслати. Можливо, користувач закрив чат із ботом.")
 
+# ---------- Діагностика: ловимо будь-які приватні повідомлення від адміна (без реплаю)
+@dp.message((F.chat.type == "private") & (F.from_user.id == ADMIN_USER_ID))
+async def any_admin_pm(m: Message):
+    log.info("Admin PM (non-reply): chat.id=%s text=%r", m.chat.id, m.text)
+
 # ---------- ЗАПУСК ----------
 async def main():
-    print("✅ Admin relay bot started")
+    log.info("Start polling")
+    me = await bot.get_me()
+    log.info("Run polling for bot @%s id=%s - %r", me.username, me.id, me.first_name)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
