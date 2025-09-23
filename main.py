@@ -195,3 +195,24 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# === АДМІН: ручна відповідь /to <uid> <text> ===
+@dp.message(
+    (F.chat.type == "private") &
+    (F.from_user.id == ADMIN_USER_ID) &
+    F.text.regexp(r"^/to\s+(\d+)\s+(.+)", flags=re.S)
+)
+async def admin_manual_reply(m: Message):
+    mobj = re.match(r"^/to\s+(\d+)\s+(.+)", m.text, flags=re.S)
+    if not mobj:
+        await m.reply("Формат: <code>/to &lt;user_id&gt; &lt;повідомлення&gt;</code>")
+        return
+    uid = int(mobj.group(1))
+    text = mobj.group(2).strip()
+    try:
+        await bot.send_message(uid, f"✉️ <b>Від адміна</b>:\n{text}")
+        await m.reply("✅ Надіслано.")
+        log.info("Manual /to delivered to user %s", uid)
+    except Exception as e:
+        log.exception("Manual /to failed user %s: %s", uid, e)
+        await m.reply("⚠️ Не вдалося надіслати (можливо, користувач закрив чат із ботом).")
