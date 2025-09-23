@@ -1,7 +1,8 @@
 import os
+import re
 import asyncio
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
@@ -25,12 +26,12 @@ try:
     ADMIN_USER_ID = int(ADMIN_USER_ID_RAW)
 except Exception:
     ADMIN_USER_ID = None
-    log.warning("⚠️ ADMIN_USER_ID не задано. Надішли /id боту й додай значення у Railway → Variables.")
+    log.warning("⚠️ ADMIN_USER_ID не задано. Надішли /id боту і додай ADMIN_USER_ID у Railway.")
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# message_id у чаті адміна → user_id користувача
+# message_id у чаті адміна → user_id користувача (пам'ять у процесі)
 ROUTE: Dict[int, int] = {}
 
 # ---------- ТЕКСТИ / КНОПКИ ----------
@@ -54,7 +55,7 @@ PROJECTS = [
     ("📸 Контент-чат", "https://t.me/+3gPoOsKhGF8zZWRi"),
     ("📝 Instagram блог", "https://instagram.com/esmeralda_kissa"),
     ("📽️ Фільмотека кіно", "https://t.me/swoi_kino"),
-    ("🚕 SWої Taxi/Bla-blaCar", "https://t.me/+bfqsxj8G3-0xZjNi"),
+    ("🚕 SWої Taxi/Bla-blaCar", "https://t.me/+3gPoOsKhGF8zZWRi"),
     ("☠️ Чат-анархія", "https://t.me/komenty_swoih"),
     ("✌️ Резервний чат в Signal",
      "https://signal.group/#CjQKIMLrwXMW3n_zvvA_vQsIh5wuSvKpb9SoDXD8KwOJJl7FEhA-5oVc-cdP00VFwuLF1IRG"),
@@ -72,6 +73,26 @@ def projects_kb():
         kb.button(text=name, url=url)
     kb.adjust(1)
     return kb.as_markup()
+
+# ---------- УТИЛІТИ ----------
+UID_PATTERNS = [
+    re.compile(r"UID:\s*(\d+)"),
+    re.compile(r"user_id\s*=\s*<code>(\d+)</code>"),
+    re.compile(r"tg://user\?id=(\d+)"),
+    re.compile(r"\bID[:=]\s*(\d+)\b"),
+]
+
+def extract_uid_from_text(text: str) -> Optional[int]:
+    if not text:
+        return None
+    for pat in UID_PATTERNS:
+        m = pat.search(text)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                continue
+    return None
 
 # ---------- КОМАНДИ ----------
 @dp.message(F.text == "/start")
@@ -93,7 +114,7 @@ async def cmd_id(m: Message):
 # ---------- КОРИСТУВАЧ → АДМІН ----------
 @dp.message(F.chat.type == "private")
 async def from_user(m: Message):
-    # не маршрутизувати, якщо пише сам адмін
+    # ігноруємо, якщо пише сам адмін
     if ADMIN_USER_ID and m.from_user.id == ADMIN_USER_ID:
         return
 
@@ -102,46 +123,59 @@ async def from_user(m: Message):
         return
 
     u = m.from_user
+    uid_line = f"UID: {u.id}"  # явна лінійка для фолбеку
     header = (
         "📥 <b>Нове звернення</b>\n"
         f"👤 {u.full_name} @{u.username or '—'}\n"
         f"🆔 <code>{u.id}</code>\n"
+        f"{uid_line}\n"
         f"🔗 <a href='tg://user?id={u.id}'>відкрити профіль</a>\n\n"
-        "✍️ Можеш відповісти <b>реплаєм</b> на <b>будь-яке</b> з двох повідомлень нижче (шапка або копія) — я перешлю користувачу."
+        "✍️ Можеш відповісти <b>реплаєм</b> на <b>будь-яке</b> із двох повідомлень нижче (шапка або копія) — я перешлю користувачу."
     )
 
-    # 1) шапка
+    # 1) шапка (містить UID)
     head_msg = await bot.send_message(ADMIN_USER_ID, header, disable_web_page_preview=True)
-    # 2) копія оригіналу (медіа збережуться)
+    # 2) копія повідомлення (для медіа)
     copy_msg = await m.copy_to(ADMIN_USER_ID)
 
-    # Зберігаємо маршрути для ОБОХ варіантів (реплай на шапку або на копію)
+    # Прив'язуємо ОБИДВА message_id до користувача
     ROUTE[head_msg.message_id] = u.id
     ROUTE[copy_msg.message_id] = u.id
 
-    log.info("Звернення від %s (%s), збережено route for head=%s, copy=%s",
-             u.id, u.username, head_msg.message_id, copy_msg.message_id)
+    log.info("Route saved: admin_head_msg_id=%s, admin_copy_msg_id=%s -> user=%s",
+             head_msg.message_id, copy_msg.message_id, u.id)
 
-# ---------- АДМІН → КОРИСТУВАЧ (реплай на шапку або копію) ----------
+# ---------- АДМІН → КОРИСТУВАЧ ----------
 @dp.message((F.chat.type == "private") & (F.from_user.id == ADMIN_USER_ID) & (F.reply_to_message != None))
 async def from_admin_reply(m: Message):
+    # 1) спроба знайти за ROUTE
     reply_to_id = m.reply_to_message.message_id
     user_id = ROUTE.get(reply_to_id)
 
+    # 2) фолбек — дістаємо UID із тексту/капшена повідомлення, на яке відповіли
     if not user_id:
-        await m.reply("ℹ️ Не знайшов одержувача. Попроси юзера написати ще раз у бот — і відповідай реплаєм.")
+        src_text = (m.reply_to_message.text or "") + "\n" + (m.reply_to_message.caption or "")
+        user_id = extract_uid_from_text(src_text)
+        if user_id:
+            log.info("Fallback UID parsed from text: %s", user_id)
+
+    if not user_id:
+        await m.reply(
+            "ℹ️ Не знайшов одержувача. Попроси користувача написати ще раз, "
+            "або відповідай саме на повідомлення зі шапкою, де є рядок «UID: …»."
+        )
+        log.warning("No route/UID for admin reply. reply_to_id=%s", reply_to_id)
         return
 
     try:
         if m.text:
             await bot.send_message(user_id, f"✉️ <b>Від адміна</b>:\n{m.text}")
         else:
-            # для фото/відео/доків копіюємо як є
-            await m.copy_to(user_id)
+            await m.copy_to(user_id)  # фото/відео/док — копією
         await m.reply("✅ Відповідь надіслана.")
-        log.info("Відповідь доставлена користувачу %s", user_id)
+        log.info("Reply delivered to user %s", user_id)
     except Exception as e:
-        log.exception("Send fail: %s", e)
+        log.exception("Send fail to user %s: %s", user_id, e)
         await m.reply("⚠️ Не вдалося надіслати. Можливо, користувач закрив чат із ботом.")
 
 # ---------- ЗАПУСК ----------
