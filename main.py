@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Dict, Optional
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
@@ -16,21 +16,22 @@ log = logging.getLogger("admin_bot")
 # ---------- ENV ----------
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 if not BOT_TOKEN or " " in BOT_TOKEN:
-    raise SystemExit("❌ BOT_TOKEN не знайдено або містить пробіли.")
+    raise SystemExit("❌ BOT_TOKEN не знайдено або містить пробіли. Додай у Railway → Service → Variables.")
 
 ADMIN_USER_ID_RAW = (os.getenv("ADMIN_USER_ID") or "").strip()
 try:
     ADMIN_USER_ID = int(ADMIN_USER_ID_RAW)
 except Exception:
     ADMIN_USER_ID = None
-    log.warning("⚠️ ADMIN_USER_ID не задано.")
+    log.warning("⚠️ ADMIN_USER_ID не задано. Надішли /id боту й додай ADMIN_USER_ID у Railway.")
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# admin_msg_id -> user_id
+# message_id у чаті адміна → user_id користувача (живе в пам'яті процесу)
 ROUTE: Dict[int, int] = {}
 
+# ---------- ТЕКСТИ / КНОПКИ ----------
 WELCOME_TEXT = (
     "🤖 Привіт! Ти в чаті з адмінами\n"
     "🍓🔞 SWої люди: Клуб України 🔞🍓🇺🇦\n\n"
@@ -76,6 +77,7 @@ UID_PATTERNS = [
     re.compile(r"tg://user\?id=(\d+)"),
     re.compile(r"\bID[:=]\s*(\d+)\b"),
 ]
+
 def extract_uid_from_text(text: str) -> Optional[int]:
     if not text:
         return None
@@ -85,120 +87,99 @@ def extract_uid_from_text(text: str) -> Optional[int]:
             try:
                 return int(m.group(1))
             except Exception:
-                pass
+                continue
     return None
 
-# ---------- КОМАНДИ ----------
-@dp.message(F.text == "/start")
-async def cmd_start(m: Message):
-    await m.answer(WELCOME_TEXT, reply_markup=start_kb())
+# ---------- БАЗОВІ КОМАНДИ ----------
+@dp.message()
+async def router(m: Message):
+    """
+    Єдиний «надійний» роутер:
+    - ловимо всі повідомлення
+    - всередині розгалужуємо сценарії
+    """
+    # Безпечні значення
+    chat_type = getattr(m.chat, "type", None)
+    from_id = getattr(m.from_user, "id", None)
 
-@dp.callback_query(F.data == "show:projects")
-async def show_projects(cb: CallbackQuery):
-    try:
-        await cb.answer()
-    except Exception:
-        pass
-    await cb.message.answer("📂 Наші проєкти:", reply_markup=projects_kb())
-
-@dp.message(F.text == "/id")
-async def cmd_id(m: Message):
-    await m.reply(f"chat_id = <code>{m.chat.id}</code>\nuser_id = <code>{m.from_user.id}</code>")
-
-# ---------- КОРИСТУВАЧ → АДМІН ----------
-# ВАЖЛИВО: хендлер відразу виключає адміна, щоб не блокувати інші хендлери
-@dp.message((F.chat.type == "private") & (F.from_user.id != ADMIN_USER_ID))
-async def from_user(m: Message):
-    if ADMIN_USER_ID is None:
-        await m.answer("⚠️ Бот ще не налаштований: ADMIN_USER_ID відсутній.")
+    # /start, /id, кнопки
+    if m.text == "/start":
+        await m.answer(WELCOME_TEXT, reply_markup=start_kb())
+        return
+    if m.text == "/id":
+        await m.reply(f"chat_id = <code>{m.chat.id}</code>\nuser_id = <code>{from_id}</code>")
         return
 
-    u = m.from_user
-    uid_line = f"UID: {u.id}"
-    header = (
-        "📥 <b>Нове звернення</b>\n"
-        f"👤 {u.full_name} @{u.username or '—'}\n"
-        f"🆔 <code>{u.id}</code>\n"
-        f"{uid_line}\n"
-        f"🔗 <a href='tg://user?id={u.id}'>відкрити профіль</a>\n\n"
-        "✍️ Відповідай <b>реплаєм</b> на <b>шапку</b> або <b>копію</b> — я перешлю користувачу."
-    )
+    # CallbackQuery тут не прилетить, але тримаємо кнопки через окремий handler:
+    # (див. нижче on_callback)
 
-    head_msg = await bot.send_message(ADMIN_USER_ID, header, disable_web_page_preview=True)
-    copy_msg = await m.copy_to(ADMIN_USER_ID)
-
-    ROUTE[head_msg.message_id] = u.id
-    ROUTE[copy_msg.message_id] = u.id
-
-    log.info("Route saved: head_id=%s copy_id=%s -> user=%s",
-             head_msg.message_id, copy_msg.message_id, u.id)
-
-# ---------- АДМІН → КОРИСТУВАЧ (ультра-лояльний реплай) ----------
-@dp.message((F.reply_to_message != None) & (F.from_user.id == ADMIN_USER_ID))
-async def admin_reply_any_chat(m: Message):
-    log.info("Seen REPLY from admin: chat.id=%s from_user.id=%s reply_to_id=%s",
-             m.chat.id, m.from_user.id,
-             m.reply_to_message.message_id if m.reply_to_message else None)
-
-    reply_to_id = m.reply_to_message.message_id
-    user_id = ROUTE.get(reply_to_id)
-
-    if not user_id:
-        src_text = (m.reply_to_message.text or "") + "\n" + (m.reply_to_message.caption or "")
-        user_id = extract_uid_from_text(src_text)
-        if user_id:
-            log.info("Fallback UID parsed from replied message: %s", user_id)
-
-    if not user_id:
-        await m.reply(
-            "ℹ️ Не знайшов одержувача. Відповідай саме на «шапку» з рядком <b>UID: …</b> "
-            "або скористайся командою <code>/to &lt;user_id&gt; &lt;текст&gt;</code>."
+    # 1) КОРИСТУВАЧ → АДМІН (приват не від адміна)
+    if chat_type == "private" and ADMIN_USER_ID and from_id != ADMIN_USER_ID:
+        u = m.from_user
+        uid_line = f"UID: {u.id}"  # явний рядок для фолбеку
+        header = (
+            "📥 <b>Нове звернення</b>\n"
+            f"👤 {u.full_name} @{u.username or '—'}\n"
+            f"🆔 <code>{u.id}</code>\n"
+            f"{uid_line}\n"
+            f"🔗 <a href='tg://user?id={u.id}'>відкрити профіль</a>\n\n"
+            "✍️ Відповідай <b>реплаєм</b> на <b>шапку або копію</b> нижче — я перешлю користувачу."
         )
-        log.warning("No user_id for admin reply. reply_to_id=%s", reply_to_id)
+        head_msg = await bot.send_message(ADMIN_USER_ID, header, disable_web_page_preview=True)
+        copy_msg = await m.copy_to(ADMIN_USER_ID)
+
+        ROUTE[head_msg.message_id] = u.id
+        ROUTE[copy_msg.message_id] = u.id
+        log.info("Route saved head=%s copy=%s -> user=%s", head_msg.message_id, copy_msg.message_id, u.id)
         return
 
-    try:
-        if m.text:
-            await bot.send_message(user_id, f"✉️ <b>Від адміна</b>:\n{m.text}")
-        else:
-            await m.copy_to(user_id)
-        await m.reply("✅ Відповідь надіслана.")
-        log.info("Reply delivered to user %s", user_id)
-    except Exception as e:
-        log.exception("Send fail to user %s: %s", user_id, e)
-        await m.reply("❌ Не вдалося надіслати. Ймовірно, користувач не натиснув /start або заблокував бота.")
+    # 2) АДМІН → КОРИСТУВАЧ (приват від адміна І це відповідь)
+    if chat_type == "private" and ADMIN_USER_ID and from_id == ADMIN_USER_ID and m.reply_to_message:
+        reply_to_id = m.reply_to_message.message_id
+        user_id = ROUTE.get(reply_to_id)
 
-# ---------- АДМІН: ручна відповідь /to <uid> <текст> ----------
-@dp.message(
-    (F.chat.type == "private") &
-    (F.from_user.id == ADMIN_USER_ID) &
-    F.text.regexp(r"^/to\s+(\d+)\s+(.+)", flags=re.S)
-)
-async def admin_manual_reply(m: Message):
-    mobj = re.match(r"^/to\s+(\d+)\s+(.+)", m.text, flags=re.S)
-    if not mobj:
-        await m.reply("Формат: <code>/to &lt;user_id&gt; &lt;повідомлення&gt;</code>")
+        if not user_id:
+            # Фолбек: спроба дістати UID з тексту/підпису повідомлення, на яке відповідаємо (шапка)
+            src_text = (m.reply_to_message.text or "") + "\n" + (m.reply_to_message.caption or "")
+            user_id = extract_uid_from_text(src_text)
+            if user_id:
+                log.info("Fallback UID parsed: %s", user_id)
+
+        if not user_id:
+            await m.reply("ℹ️ Не знайшов одержувача. Відповідай саме на шапку/копію останнього звернення (де є рядок «UID: …»).")
+            log.warning("No route/UID for admin reply. reply_to_id=%s", reply_to_id)
+            return
+
+        try:
+            if m.text:
+                await bot.send_message(user_id, f"✉️ <b>Від адміна</b>:\n{m.text}")
+            else:
+                await m.copy_to(user_id)  # фото/відео/док
+            await m.reply("✅ Відповідь надіслана.")
+            log.info("Reply delivered to user %s", user_id)
+        except Exception as e:
+            log.exception("Send fail to user %s: %s", user_id, e)
+            await m.reply("⚠️ Не вдалося надіслати. Можливо, користувач закрив чат із ботом.")
         return
-    uid = int(mobj.group(1))
-    text = mobj.group(2).strip()
-    try:
-        await bot.send_message(uid, f"✉️ <b>Від адміна</b>:\n{text}")
-        await m.reply("✅ Надіслано.")
-        log.info("Manual /to delivered to user %s", uid)
-    except Exception as e:
-        log.exception("Manual /to failed user %s: %s", uid, e)
-        await m.reply("⚠️ Не вдалося надіслати (можливо, користувач закрив чат із ботом).")
 
-# ---------- Діагностика: приватні повідомлення від адміна (нереплай) ----------
-@dp.message((F.chat.type == "private") & (F.from_user.id == ADMIN_USER_ID))
-async def any_admin_pm(m: Message):
-    log.info("Admin PM (non-reply): chat.id=%s text=%r", m.chat.id, m.text)
+    # 3) Інше — ігноруємо тихо
+    # (наприклад, приват адміна без реплая, або групові чати тощо)
+    return
+
+@dp.callback_query()
+async def on_callback(cb: CallbackQuery):
+    # єдина кнопка — «Список проєктів»
+    if cb.data == "show:projects":
+        try:
+            await cb.answer()
+        except Exception:
+            pass
+        kb = projects_kb()
+        await cb.message.answer("📂 Наші проєкти:", reply_markup=kb)
 
 # ---------- ЗАПУСК ----------
 async def main():
-    log.info("Start polling")
-    me = await bot.get_me()
-    log.info("Run polling for bot @%s id=%s - %r", me.username, me.id, me.first_name)
+    print("✅ Admin relay bot started")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
