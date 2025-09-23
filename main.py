@@ -16,14 +16,14 @@ log = logging.getLogger("admin_bot")
 # ---------- ENV ----------
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 if not BOT_TOKEN or " " in BOT_TOKEN:
-    raise SystemExit("❌ BOT_TOKEN не знайдено або містить пробіли. Додай у Railway → Service → Variables.")
+    raise SystemExit("❌ BOT_TOKEN не знайдено або містить пробіли.")
 
 ADMIN_USER_ID_RAW = (os.getenv("ADMIN_USER_ID") or "").strip()
 try:
     ADMIN_USER_ID = int(ADMIN_USER_ID_RAW)
 except Exception:
     ADMIN_USER_ID = None
-    log.warning("⚠️ ADMIN_USER_ID не задано. Надішли /id боту і додай ADMIN_USER_ID у Railway.")
+    log.warning("⚠️ ADMIN_USER_ID не задано.")
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -31,7 +31,6 @@ dp = Dispatcher()
 # admin_msg_id -> user_id
 ROUTE: Dict[int, int] = {}
 
-# ---------- ТЕКСТИ / КНОПКИ ----------
 WELCOME_TEXT = (
     "🤖 Привіт! Ти в чаті з адмінами\n"
     "🍓🔞 SWої люди: Клуб України 🔞🍓🇺🇦\n\n"
@@ -71,7 +70,6 @@ def projects_kb():
     kb.adjust(1)
     return kb.as_markup()
 
-# ---------- УТИЛІТА: витягнути UID зі шапки/тексту ----------
 UID_PATTERNS = [
     re.compile(r"UID:\s*(\d+)"),
     re.compile(r"user_id\s*=\s*<code>(\d+)</code>"),
@@ -90,7 +88,7 @@ def extract_uid_from_text(text: str) -> Optional[int]:
                 pass
     return None
 
-# ---------- КОМАНДИ / UI ----------
+# ---------- КОМАНДИ ----------
 @dp.message(F.text == "/start")
 async def cmd_start(m: Message):
     await m.answer(WELCOME_TEXT, reply_markup=start_kb())
@@ -108,11 +106,9 @@ async def cmd_id(m: Message):
     await m.reply(f"chat_id = <code>{m.chat.id}</code>\nuser_id = <code>{m.from_user.id}</code>")
 
 # ---------- КОРИСТУВАЧ → АДМІН ----------
-@dp.message(F.chat.type == "private")
+# ВАЖЛИВО: хендлер відразу виключає адміна, щоб не блокувати інші хендлери
+@dp.message((F.chat.type == "private") & (F.from_user.id != ADMIN_USER_ID))
 async def from_user(m: Message):
-    if ADMIN_USER_ID and m.from_user.id == ADMIN_USER_ID:
-        return  # адмін пише в бота — не сприймаємо як звернення
-
     if ADMIN_USER_ID is None:
         await m.answer("⚠️ Бот ще не налаштований: ADMIN_USER_ID відсутній.")
         return
@@ -140,16 +136,13 @@ async def from_user(m: Message):
 # ---------- АДМІН → КОРИСТУВАЧ (ультра-лояльний реплай) ----------
 @dp.message((F.reply_to_message != None) & (F.from_user.id == ADMIN_USER_ID))
 async def admin_reply_any_chat(m: Message):
-    # діагностика будь-якого реплаю від адміна
     log.info("Seen REPLY from admin: chat.id=%s from_user.id=%s reply_to_id=%s",
              m.chat.id, m.from_user.id,
              m.reply_to_message.message_id if m.reply_to_message else None)
 
-    # 1) пробуємо знайти користувача за ROUTE
     reply_to_id = m.reply_to_message.message_id
     user_id = ROUTE.get(reply_to_id)
 
-    # 2) фолбек — дістаємо UID із тексту/caption оригіналу (шапка містить UID)
     if not user_id:
         src_text = (m.reply_to_message.text or "") + "\n" + (m.reply_to_message.caption or "")
         user_id = extract_uid_from_text(src_text)
@@ -168,7 +161,7 @@ async def admin_reply_any_chat(m: Message):
         if m.text:
             await bot.send_message(user_id, f"✉️ <b>Від адміна</b>:\n{m.text}")
         else:
-            await m.copy_to(user_id)  # фото/відео/док
+            await m.copy_to(user_id)
         await m.reply("✅ Відповідь надіслана.")
         log.info("Reply delivered to user %s", user_id)
     except Exception as e:
